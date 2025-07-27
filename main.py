@@ -38,6 +38,7 @@ def run_trading(req: TradeRequest):
         logger.info("Starting trading pipeline...")
         
         result = trading_pipeline(
+            name=req.name,
             model_save_path = "models/td3_model_with_macro.zip",
             data_path="data/test.csv",
             initial_capital=req.initialCapital,

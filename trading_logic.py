@@ -90,7 +90,7 @@ def calculate_sharpe_ratio(df_account_value, portfolio_value_col):
     return round(sharpe_ratio, 4)
 
 
-def trading_pipeline(model_save_path, data_path, initial_capital, start_date, end_date):
+def trading_pipeline(name, model_save_path, data_path, initial_capital, start_date, end_date):
     try:
         logger.info(f"Starting trading pipeline with parameters:")
         logger.info(f"model_save_path: {model_save_path}")
@@ -166,6 +166,7 @@ def trading_pipeline(model_save_path, data_path, initial_capital, start_date, en
         sharpe_ratio = calculate_sharpe_ratio(df_account_value, portfolio_value_col)
 
         trading_result = {
+            "name": name,
             "initial_capital": initial_capital,
             "final_asset": final_asset,
             "profit": final_asset - initial_capital,

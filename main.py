@@ -1,6 +1,14 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
+from trading_logic import trading_pipeline
+from typing import Optional
+import uvicorn
+import logging
+
+# 로깅 설정
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
@@ -23,13 +31,39 @@ class TradeRequest(BaseModel):
 def read_root():
     return {"message": "Welcome to America Stock Hunters Backend!"}
 
-@app.post("/api/v1/start") # fastapi는 POST 방식일 때 자동으로 request body에서 데이터를 추출
-def create_user(data: TradeRequest):
-    """ 
-    Create a new user with the provided data.
-    This endpoint is used to start trading with the given parameters.
-    """
-    print("Received trading request:", data)
-    # 실제 트레이딩 로직을 추가 필요
+@app.post("/api/v1/trades") # fastapi는 POST 방식일 때 자동으로 request body에서 데이터를 추출
+def run_trading(req: TradeRequest):
+    try: 
+        logger.info(f"Received trading request: {req}")
+        logger.info("Starting trading pipeline...")
+        
+        result = trading_pipeline(
+            model_save_path = "models/td3_model_with_macro.zip",
+            data_path="data/test.csv",
+            initial_capital=req.initialCapital,
+            start_date=req.startDate,
+            end_date=req.endDate
+        )
+        
+        logger.info("Trading pipeline completed successfully")
+        logger.info(f"Result: {result}")
+        
+        return {
+            "status": "success",
+            "message": f"{req.name} 의 트레이딩이 완료됨",
+            "result": result
+        }
+    except Exception as e:
+        logger.error(f"Error in run_trading: {str(e)}", exc_info=True)
+        return {
+            "status": "error",
+            "message": str(e)
+        }
     
-    return {"message": f"{data.name} 의 트레이딩이 시작됨!"}
+@app.get("/api/v1/trades")
+def get_trading_results():
+    # 전역상태로 저장한 트레이딩 결과를 기반으로 처리
+    return {"message": "Trading results retrieved successfully!"}
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000) # (reload=True) WARNING:  You must pass the application as an import string to enable 'reload' or 'workers'.

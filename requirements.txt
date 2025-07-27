@@ -1,3 +1,6 @@
 fastapi
 uvicorn[standard]
 pydantic
+pandas
+stable-baseline3
+FinRL

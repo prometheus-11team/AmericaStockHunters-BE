@@ -78,6 +78,7 @@ def simulate_trading(model, env):
 
     df_account_value = env.save_asset_memory()  # 포트폴리오 가치 시계열
     df_actions = env.save_action_memory()       # 개별 종목 거래 기록
+    df_actions = df_actions.reset_index(drop=True) # 인덱스 리셋 추가
     return df_account_value, df_actions
 
 
@@ -92,6 +93,7 @@ def calculate_sharpe_ratio(df_account_value, portfolio_value_col):
 
 
 def format_transactions(df_actions, df_data, df_account_value):
+    df_actions = df_actions.reset_index(drop=True)  # 인덱스 리셋 추가
     """
     df_actions를 프론트엔드 TradingHistory 페이지에 필요한 거래내역 형식으로 변환
     """
@@ -99,26 +101,24 @@ def format_transactions(df_actions, df_data, df_account_value):
     USED_TICS = ['AAPL', 'AMZN', 'GOOGL', 'META', 'MSFT', 'NVDA', 'TSLA']
     
     if df_actions.empty:
-        logger.info("df_actions is empty, generating sample transactions")
-        return generate_sample_transactions()
+        logger.info("df_actions is empty, no transactions to format")
+        return []
     
     logger.info(f"df_actions columns: {df_actions.columns.tolist()}")
     logger.info(f"df_actions shape: {df_actions.shape}")
     
-    # 간단한 가격 데이터 준비
+    # 각 종목별 가격 데이터 준비
     price_data = {}
     try:
         for tic in USED_TICS:
             tic_data = df_data[df_data['tic'] == tic]
             if not tic_data.empty:
-                # 첫 번째 가격만 사용
-                first_price = tic_data.iloc[0]['close']
-                price_data[tic] = first_price
+                price_data[tic] = tic_data
     except Exception as e:
         logger.error(f"Error preparing price data: {e}")
-        # 기본 가격 설정
-        for tic in USED_TICS:
-            price_data[tic] = 100.0
+        return []
+    
+    transaction_id = 1
     
     for idx, row in df_actions.iterrows():
         # 날짜 정보 추출
@@ -148,11 +148,21 @@ def format_transactions(df_actions, df_data, df_account_value):
                 action_value = row[tic]
                 quantity = abs(action_value)
                 
-                # 가격 정보 가져오기
-                price = price_data.get(tic, 100.0)
+                # 해당 시점의 가격 정보 가져오기
+                price = 100.0  # 기본값
+                if tic in price_data:
+                    tic_price_data = price_data[tic]
+                    if idx < len(tic_price_data):
+                        price = tic_price_data.iloc[idx]['close']
+                    else:
+                        # 인덱스가 범위를 벗어나면 마지막 가격 사용
+                        price = tic_price_data.iloc[-1]['close']
                 
                 # 거래 타입 결정 (양수면 매수, 음수면 매도)
                 trade_type = "Buy" if action_value > 0 else "Sell"
+                
+                # 거래 금액 계산
+                trade_amount = quantity * price
                 
                 # 손익 계산 (매도인 경우)
                 profit_loss = None
@@ -161,68 +171,129 @@ def format_transactions(df_actions, df_data, df_account_value):
                     profit_loss = 0.0  # 실제 구현에서는 이전 매수 가격과 비교 필요
                 
                 transaction = {
+                    "id": int(transaction_id),
                     "datetime": f"{date_str} 10:00",
                     "symbol": tic,
                     "type": trade_type,
-                    "quantity": str(quantity),
-                    "price": str(round(price, 2)),
-                    "profitLoss": profit_loss
+                    "quantity": int(quantity),
+                    "price": float(round(price, 2)),
+                    "amount": float(round(trade_amount, 2)),
+                    "profitLoss": float(profit_loss) if profit_loss is not None else None,
+                    "day": int(idx + 1)
                 }
                 
                 transactions.append(transaction)
-                logger.info(f"Added transaction: {transaction}")
+                logger.info(f"Transaction {transaction_id}: {trade_type} {quantity} shares of {tic} at ${price:.2f} = ${trade_amount:.2f}")
+                transaction_id += 1
     
     logger.info(f"Total transactions formatted: {len(transactions)}")
     return transactions
 
 
-def generate_sample_transactions():
+def calculate_portfolio_status(df_actions, df_data, df_account_value, initial_capital):
     """
-    샘플 거래내역 생성 (테스트용)
+    투자 종료일 기준 보유중인 종목들의 포트폴리오 상태를 계산
     """
-    sample_transactions = [
-        {
-            "datetime": "2024-01-15 10:00",
-            "symbol": "AAPL",
-            "type": "Buy",
-            "quantity": "4.0",
-            "price": "190.1",
-            "profitLoss": None
-        },
-        {
-            "datetime": "2024-01-16 10:00",
-            "symbol": "MSFT",
-            "type": "Buy",
-            "quantity": "2.0",
-            "price": "380.5",
-            "profitLoss": None
-        },
-        {
-            "datetime": "2024-01-17 10:00",
-            "symbol": "GOOGL",
-            "type": "Buy",
-            "quantity": "3.0",
-            "price": "140.2",
-            "profitLoss": None
-        },
-        {
-            "datetime": "2024-01-18 10:00",
-            "symbol": "AAPL",
-            "type": "Sell",
-            "quantity": "2.0",
-            "price": "195.3",
-            "profitLoss": "10.4"
-        },
-        {
-            "datetime": "2024-01-19 10:00",
-            "symbol": "NVDA",
-            "type": "Buy",
-            "quantity": "1.0",
-            "price": "450.0",
-            "profitLoss": None
-        }
-    ]
-    return sample_transactions
+    USED_TICS = ['AAPL', 'AMZN', 'GOOGL', 'META', 'MSFT', 'NVDA', 'TSLA']
+    portfolio_status = []
+    
+    logger.info(f"Starting portfolio status calculation...")
+    logger.info(f"df_actions shape: {df_actions.shape}")
+    logger.info(f"df_data shape: {df_data.shape}")
+    logger.info(f"df_account_value shape: {df_account_value.shape}")
+    
+    # 각 종목별 보유 현황 계산
+    for symbol in USED_TICS:
+        logger.info(f"Processing symbol: {symbol}")
+        
+        # 해당 종목의 최종 가격 가져오기
+        symbol_data = df_data[df_data['tic'] == symbol]
+        if symbol_data.empty:
+            logger.warning(f"No data found for symbol: {symbol}")
+            continue
+            
+        # 최종 가격 (마지막 날짜의 종가)
+        current_price = symbol_data.iloc[-1]['close']
+        logger.info(f"Current price for {symbol}: ${current_price:.2f}")
+        
+        # 해당 종목의 총 매수/매도 수량 계산
+        total_shares = 0
+        total_cost = 0
+        
+        if not df_actions.empty:
+            logger.info(f"Processing actions for {symbol}")
+            for idx, row in df_actions.iterrows():
+                if symbol in row and row[symbol] != 0:
+                    action_value = row[symbol]
+                    logger.info(f"Action for {symbol} at index {idx}: {action_value}")
+                    
+                    if action_value > 0:  # 매수
+                        # 해당 시점의 가격 가져오기
+                        action_price = symbol_data.iloc[0]['close']  # 기본값으로 첫 번째 가격 사용
+                        
+                        # 인덱스를 기반으로 해당 시점의 가격 추정
+                        if idx < len(symbol_data):
+                            action_price = symbol_data.iloc[idx]['close']
+                        
+                        shares_bought = action_value
+                        total_shares += shares_bought
+                        total_cost += shares_bought * action_price
+                        logger.info(f"Buy {symbol}: {shares_bought} shares at ${action_price:.2f}")
+                    else:  # 매도
+                        shares_sold = abs(action_value)
+                        total_shares -= shares_sold
+                        logger.info(f"Sell {symbol}: {shares_sold} shares")
+        else:
+            logger.warning(f"No actions data available")
+        
+        logger.info(f"Final shares for {symbol}: {total_shares}")
+        
+        # 보유 주식이 있는 경우에만 포트폴리오 상태에 추가
+        if total_shares > 0:
+            # 평균 매입 단가 계산
+            avg_price = total_cost / total_shares if total_shares > 0 else 0
+            
+            # 총 보유 금액
+            total_value = total_shares * current_price
+            
+            # 수익률 계산
+            profit_rate = ((current_price / avg_price - 1) * 100) if avg_price > 0 else 0
+            
+            # 전체 포트폴리오 대비 비중 계산
+            # 최종 자산 가치를 기준으로 계산
+            final_total_assets = initial_capital
+            if not df_account_value.empty:
+                # account_value 컬럼이 있는지 확인
+                if 'account_value' in df_account_value.columns:
+                    final_total_assets = df_account_value.iloc[-1]['account_value']
+                elif 'total_assets' in df_account_value.columns:
+                    final_total_assets = df_account_value.iloc[-1]['total_assets']
+                else:
+                    # 수치형 컬럼 중 첫 번째 사용
+                    numeric_cols = df_account_value.select_dtypes(include=[np.number]).columns
+                    if len(numeric_cols) > 0:
+                        final_total_assets = df_account_value.iloc[-1][numeric_cols[0]]
+            
+            share_percentage = (total_value / final_total_assets * 100) if final_total_assets > 0 else 0
+            
+            portfolio_item = {
+                "symbol": symbol,
+                "avg": float(round(avg_price, 2)),
+                "now": float(round(current_price, 2)),
+                "profit_rate": float(round(profit_rate, 2)),
+                "total": float(round(total_value, 2)),
+                "share": float(round(share_percentage, 2)),
+                "qty": int(total_shares),
+                "profit": float(round((current_price - avg_price) * total_shares, 2))  # 종목별 증감액
+            }
+            
+            portfolio_status.append(portfolio_item)
+            logger.info(f"Portfolio status for {symbol}: {portfolio_item}")
+        else:
+            logger.info(f"No shares held for {symbol}")
+    
+    logger.info(f"Total portfolio status items: {len(portfolio_status)}")
+    return portfolio_status
 
 
 def trading_pipeline(name, model_save_path, data_path, initial_capital, start_date, end_date):
@@ -291,6 +362,7 @@ def trading_pipeline(name, model_save_path, data_path, initial_capital, start_da
         logger.info(f"df_actions columns: {df_actions.columns.tolist()}")
         if not df_actions.empty:
             logger.info(f"df_actions head: {df_actions.head().to_dict()}")
+            logger.info(f"df_actions sum: {df_actions.sum().to_dict()}")
 
         # df_account_value의 컬럼명 확인
         logger.info(f"Account value columns: {df_account_value.columns.tolist()}")
@@ -323,8 +395,17 @@ def trading_pipeline(name, model_save_path, data_path, initial_capital, start_da
             logger.info(f"Formatted {len(transactions)} transactions")
         except Exception as e:
             logger.error(f"Error formatting transactions: {e}")
-            logger.info("Using sample transactions instead")
-            transactions = generate_sample_transactions()
+            logger.info("No transactions available")
+            transactions = []
+
+        # 포트폴리오 상태 계산
+        logger.info("Calculating portfolio status...")
+        try:
+            portfolio_status = calculate_portfolio_status(df_actions, df, df_account_value, initial_capital)
+            logger.info(f"Calculated portfolio status for {len(portfolio_status)} stocks")
+        except Exception as e:
+            logger.error(f"Error calculating portfolio status: {e}")
+            portfolio_status = []
 
         trading_result = {
             "name": name,
@@ -334,11 +415,16 @@ def trading_pipeline(name, model_save_path, data_path, initial_capital, start_da
             "profit_rate": round((final_asset / initial_capital - 1) * 100, 2),
             "sharpe_ratio": sharpe_ratio,
             "account_values": df_account_value.to_dict(orient='records'),  # 포트폴리오 가치 시계열
-            "trades": df_actions.to_dict(orient='records'),                # 개별 매매 기록
-            "transactions": transactions                                    # 프론트엔드용 거래내역
+            "transactions": transactions,                                    # 거래내역
+            "portfolio_status": portfolio_status                             # 포트폴리오 상태
         }
         logger.info("Trading completed successfully!")
         logger.info(f"Trading result: {trading_result}")
+
+        if not transactions:
+            logger.info("No transactions occurred during the simulation.")
+        if not portfolio_status:
+            logger.info("No stocks held at the end of the simulation.")
 
         return trading_result
         

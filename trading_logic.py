@@ -1,9 +1,13 @@
 import pandas as pd
 import numpy as np
 from stable_baselines3 import TD3
+
+import sys
+sys.path.append('/Users/jisu/Desktop/dev/prometheus/Stock/prometheus-11team/FinRL-Library')
 from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
 from finrl.meta.preprocessor.preprocessors import data_split
 from finrl.agents.stablebaselines3.models import DRLAgent
+
 from fastapi import HTTPException
 import logging
 from datetime import datetime

@@ -2,5 +2,6 @@ fastapi
 uvicorn[standard]
 pydantic
 pandas
-stable-baseline3
+stable-baselines3
 FinRL
+alpaca-trade-api

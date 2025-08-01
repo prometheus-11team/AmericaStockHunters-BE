@@ -40,7 +40,7 @@ def run_trading(req: TradeRequest):
         result = trading_pipeline(
             name=req.name,
             # model_save_path = "models/td3_model_with_macro.zip",
-            model_save_path = "/Users/jisu/Desktop/dev/prometheus/Stock/AmericaStockHunters-BE/models/final_td3.zip",
+            model_save_path = "/Users/jisu/Desktop/dev/prometheus/Stock/AmericaStockHunters-BE/models/FINAL_TD3_ENHANCED.zip",
             data_path="/Users/jisu/Desktop/dev/prometheus/Stock/AmericaStockHunters-BE/data/final_test_df.csv",
             initial_capital=req.initialCapital,
             start_date=req.startDate,

@@ -39,8 +39,9 @@ def run_trading(req: TradeRequest):
         
         result = trading_pipeline(
             name=req.name,
-            model_save_path = "models/td3_model_with_macro.zip",
-            data_path="data/test.csv",
+            # model_save_path = "models/td3_model_with_macro.zip",
+            model_save_path = "models/final_td3.zip",
+            data_path="data/final_test_df.csv",
             initial_capital=req.initialCapital,
             start_date=req.startDate,
             end_date=req.endDate
@@ -67,4 +68,4 @@ def get_trading_results():
     return {"message": "Trading results retrieved successfully!"}
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000) # (reload=True) WARNING:  You must pass the application as an import string to enable 'reload' or 'workers'.
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True) # WARNING:  You must pass the application as an import string to enable 'reload' or 'workers'.

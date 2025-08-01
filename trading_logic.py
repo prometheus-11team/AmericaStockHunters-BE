@@ -13,39 +13,53 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 
-def load_model(model_save_path, env):
-    # stable-baselines3의 TD3 모델을 직접 로드
-    model = TD3.load(model_save_path, env=env)
+def load_model(model_save_path):
+    # TD3 모델을 직접 로드
+    model = TD3.load(model_save_path)
+    print("model loaded successfully")
     return model
 
 
 def prepare_env(df, initial_capital):
     USED_TICS = ['AAPL', 'AMZN', 'GOOGL', 'META', 'MSFT', 'NVDA', 'TSLA']
-    USED_INDICATORS = [
-        'high', 'low', 'open', 'volume', 'SMA_50', 'SMA_200', 'RSI_14', 'ROC_10', 'MACD', 'MACD_Signal',
-        'Federal Funds Rate', '10Y Treasury Yield', 'CPI', 'Core CPI', 'PCE Price Index',
-        'Retail Sales', 'Unemployment Rate', 'Non-Farm Payrolls', 'M2 Money Stock'
-    ] #학습 시 사용한 전체 지표 하드코딩
+    print(USED_TICS)
+
+    # BEFOR_EXPENDED_INDICATORS = [
+    #     'high', 'low', 'open', 'volume', 'SMA_50', 'SMA_200', 'RSI_14', 'ROC_10', 'MACD', 'MACD_Signal',
+    #     'Federal Funds Rate', '10Y Treasury Yield', 'CPI', 'Core CPI', 'PCE Price Index',
+    #     'Retail Sales', 'Unemployment Rate', 'Non-Farm Payrolls', 'M2 Money Stock'
+    # ]
+
+    ALL_INDICATORS = [ # 기술적 지표 + macro + 재무정보 + 감성분석 + Transformer
+        'SMA_50', 'SMA_200', 'RSI_14', 'ROC_10', 'MACD', 'MACD_Signal', 'Federal Funds Rate', 
+        '10Y Treasury Yield', 'CPI', 'Core CPI', 'PCE Price Index', 'Retail Sales', 'Unemployment Rate', 
+        'Non-Farm Payrolls', 'M2 Money Stock', 'transformer_prediction', 'transformer_confidence', 
+        'transformer_signal', 'negative_google_news', 'negative_reddit', 'neutral_google_news', 
+        'neutral_reddit', 'positive_google_news', 'positive_reddit']
+    # 실제 존재하는 컬럼만 남김
+    ALL_INDICATORS = [col for col in ALL_INDICATORS if col in df.columns]
+    print(ALL_INDICATORS)
+    
     df = df[df['tic'].isin(USED_TICS)]
     df = df.sort_values(['date', 'tic']).reset_index(drop=True)
     df = df.ffill().bfill()
-    df = df.dropna(subset=USED_INDICATORS)
+    df = df.dropna(subset=ALL_INDICATORS)
     df.index = df['date'].factorize()[0]
     stock_dim = len(USED_TICS)
-    state_space = 1 + 2 * stock_dim + len(USED_INDICATORS) * stock_dim
+    state_space = 1 + 2 * stock_dim + len(ALL_INDICATORS) * stock_dim
     logger.info(f"Stock dimension: {stock_dim}")
-    logger.info(f"All indicators: {USED_INDICATORS}")
+    logger.info(f"All indicators: {len(ALL_INDICATORS)} \n{ALL_INDICATORS}")
     logger.info(f"State space size: {state_space}")
     env_config = {
-        "hmax"  : 100,
+        "hmax"  : 800,  # simulation_from_saved_testset.py와 일치
         "initial_amount" : initial_capital,
-        "buy_cost_pct" : [0.001] * stock_dim,
+        "buy_cost_pct" : [0.0005] * stock_dim,  # simulation_from_saved_testset.py와 일치
         "sell_cost_pct" : [0.001] * stock_dim,
         "state_space" : state_space,
         "stock_dim" : stock_dim,
-        "tech_indicator_list" : USED_INDICATORS,
+        "tech_indicator_list" : ALL_INDICATORS,
         "action_space" : stock_dim,
-        "reward_scaling" : 1e-2,
+        "reward_scaling" : 2e-1,  # simulation_from_saved_testset.py와 일치
         "num_stock_shares": [0] * stock_dim,
         "turbulence_threshold": None,
         "day": 0,
@@ -334,13 +348,17 @@ def trading_pipeline(name, model_save_path, data_path, initial_capital, start_da
         for col in numeric_columns:
             df[col] = df[col].astype(float)
         
-        # 거시지표 컬럼들을 float로 변환
-        macro_columns = ['Federal Funds Rate', '10Y Treasury Yield', 'CPI', 'Core CPI', 
-                        'PCE Price Index', 'Retail Sales', 'Unemployment Rate', 
-                        'Non-Farm Payrolls', 'M2 Money Stock']
-        for col in macro_columns:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
+        # # 거시지표 컬럼들을 float로 변환
+        # macro_columns = ['Federal Funds Rate', '10Y Treasury Yield', 'CPI', 'Core CPI', 
+        #                 'PCE Price Index', 'Retail Sales', 'Unemployment Rate', 
+        #                 'Non-Farm Payrolls', 'M2 Money Stock', 'Operating Income', 
+        #                 'Net Income', 'EPS Diluted', 'Total Assets', 'Shareholders Equity',
+        #                 'sentiment_score_sentiment_1', 'sentiment_score_sentiment_2', 
+        #                 'importance_sentiment_2', 'transformer_prediction', 
+        #                 'transformer_confidence', 'transformer_signal']
+        # for col in macro_columns:
+        #     if col in df.columns:
+        #         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
         
         logger.info("Data preprocessing completed.")
 
@@ -350,7 +368,7 @@ def trading_pipeline(name, model_save_path, data_path, initial_capital, start_da
         
         logger.info("Loading model...")
         # 환경을 먼저 생성한 후 모델 로드
-        model = TD3.load(model_save_path, env=env)
+        model = load_model(model_save_path)
         logger.info("Model loaded successfully.")
         
         logger.info("Starting trading simulation...")
@@ -412,7 +430,7 @@ def trading_pipeline(name, model_save_path, data_path, initial_capital, start_da
             "initial_capital": initial_capital,
             "final_asset": final_asset,
             "profit": final_asset - initial_capital,
-            "profit_rate": round((final_asset / initial_capital - 1) * 100, 2),
+            "profit_rate": round(((final_asset - initial_capital) / initial_capital) * 100, 2),
             "sharpe_ratio": sharpe_ratio,
             "account_values": df_account_value.to_dict(orient='records'),  # 포트폴리오 가치 시계열
             "transactions": transactions,                                    # 거래내역

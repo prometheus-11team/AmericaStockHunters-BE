@@ -136,6 +136,11 @@ def format_transactions(df_actions, df_data, df_account_value):
         logger.error(f"Error preparing price data: {e}")
         return []
     
+    # 각 종목별 평균 매입 단가 추적
+    avg_purchase_prices = {tic: 0.0 for tic in USED_TICS}
+    total_shares_held = {tic: 0 for tic in USED_TICS}
+    total_cost_basis = {tic: 0.0 for tic in USED_TICS}
+    
     transaction_id = 1
     
     for idx, row in df_actions.iterrows():
@@ -185,8 +190,42 @@ def format_transactions(df_actions, df_data, df_account_value):
                 # 손익 계산 (매도인 경우)
                 profit_loss = None
                 if trade_type == "Sell":
-                    # 간단한 손익 계산 (실제로는 더 복잡한 로직 필요)
-                    profit_loss = 0.0  # 실제 구현에서는 이전 매수 가격과 비교 필요
+                    # 평균 매입 단가가 있는 경우에만 손익 계산
+                    if avg_purchase_prices[tic] > 0:
+                        # 매도 시 손익 = (매도가격 - 평균매입단가) * 매도수량
+                        profit_loss = (price - avg_purchase_prices[tic]) * quantity
+                        profit_loss = round(profit_loss)
+                        logger.info(f"Sell profit/loss for {tic}: (${price:.2f} - ${avg_purchase_prices[tic]:.2f}) * {quantity} = ${profit_loss:.2f}")
+                    else:
+                        profit_loss = 0.0
+                        logger.warning(f"No average purchase price available for {tic}, setting profit/loss to 0")
+                
+                # 평균 매입 단가 업데이트 (매수인 경우)
+                if trade_type == "Buy":
+                    # 새로운 매수로 인한 평균 매입 단가 재계산
+                    current_shares = total_shares_held[tic]
+                    current_cost = total_cost_basis[tic]
+                    
+                    new_shares = quantity
+                    new_cost = quantity * price
+                    
+                    total_shares_held[tic] = current_shares + new_shares
+                    total_cost_basis[tic] = current_cost + new_cost
+                    
+                    # 평균 매입 단가 = 총 매입 비용 / 총 보유 주식 수
+                    if total_shares_held[tic] > 0:
+                        avg_purchase_prices[tic] = total_cost_basis[tic] / total_shares_held[tic]
+                        logger.info(f"Updated avg purchase price for {tic}: ${avg_purchase_prices[tic]:.2f} (shares: {total_shares_held[tic]}, cost: ${total_cost_basis[tic]:.2f})")
+                
+                # 매도 시 보유 주식 수 감소
+                elif trade_type == "Sell":
+                    total_shares_held[tic] -= quantity
+                    # 매도 후 보유 주식이 0이 되면 평균 매입 단가 초기화
+                    if total_shares_held[tic] <= 0:
+                        avg_purchase_prices[tic] = 0.0
+                        total_cost_basis[tic] = 0.0
+                        total_shares_held[tic] = 0
+                        logger.info(f"Reset avg purchase price for {tic} after selling all shares")
                 
                 transaction = {
                     "id": int(transaction_id),
@@ -351,18 +390,6 @@ def trading_pipeline(name, model_save_path, data_path, initial_capital, start_da
         numeric_columns = df.select_dtypes(include=[np.number]).columns
         for col in numeric_columns:
             df[col] = df[col].astype(float)
-        
-        # # 거시지표 컬럼들을 float로 변환
-        # macro_columns = ['Federal Funds Rate', '10Y Treasury Yield', 'CPI', 'Core CPI', 
-        #                 'PCE Price Index', 'Retail Sales', 'Unemployment Rate', 
-        #                 'Non-Farm Payrolls', 'M2 Money Stock', 'Operating Income', 
-        #                 'Net Income', 'EPS Diluted', 'Total Assets', 'Shareholders Equity',
-        #                 'sentiment_score_sentiment_1', 'sentiment_score_sentiment_2', 
-        #                 'importance_sentiment_2', 'transformer_prediction', 
-        #                 'transformer_confidence', 'transformer_signal']
-        # for col in macro_columns:
-        #     if col in df.columns:
-        #         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
         
         logger.info("Data preprocessing completed.")
 

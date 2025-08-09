@@ -3,7 +3,7 @@ import numpy as np
 from stable_baselines3 import TD3
 
 import sys
-sys.path.append('/Users/jisu/Desktop/dev/prometheus/Stock/prometheus-11team/FinRL-Library')
+sys.path.append('/Users/jisu/Desktop/dev/prometheus/Stock/prometheus-11team/FinRL-Library') # main 브랜치 (250802)
 from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
 from finrl.meta.preprocessor.preprocessors import data_split
 from finrl.agents.stablebaselines3.models import DRLAgent
@@ -308,13 +308,18 @@ def calculate_portfolio_status(df_actions, df_data, df_account_value, initial_ca
         # 보유 주식이 있는 경우에만 포트폴리오 상태에 추가
         if total_shares > 0:
             # 평균 매입 단가 계산
-            avg_price = total_cost / total_shares if total_shares > 0 else 0
+            avg_price = total_cost / total_shares
             
             # 총 보유 금액
             total_value = total_shares * current_price
             
             # 수익률 계산
-            profit_rate = ((current_price / avg_price - 1) * 100) if avg_price > 0 else 0
+            if avg_price > 0:
+                profit_rate = ((current_price - avg_price) / avg_price) * 100
+            else:
+                # 평균 매입 단가가 0일 경우 profit_rate를 0으로 처리하여 0으로 나누는 오류 방지
+                logger.warning(f"Average purchase price is 0 for {symbol}, skipping profit_rate calculation.")
+                profit_rate = 0
             
             # 전체 포트폴리오 대비 비중 계산
             # 최종 자산 가치를 기준으로 계산
@@ -353,7 +358,7 @@ def calculate_portfolio_status(df_actions, df_data, df_account_value, initial_ca
     return portfolio_status
 
 
-def trading_pipeline(name, model_save_path, data_path, initial_capital, start_date, end_date):
+def trading_pipeline(name, model_save_path, df, initial_capital, start_date, end_date):
     try:
         # 입력 날짜를 datetime으로 변환
         try:
@@ -365,18 +370,10 @@ def trading_pipeline(name, model_save_path, data_path, initial_capital, start_da
             logger.error(f"Error converting dates: {e}")
             raise ValueError(f"Invalid date format: {start_date}, {end_date}")
         
-        logger.info(f"Starting trading pipeline with parameters:")
-        logger.info(f"model_save_path: {model_save_path}")
-        logger.info(f"data_path: {data_path}")
         logger.info(f"initial_capital: {initial_capital}")
         logger.info(f"start_date: {start_date}")
         logger.info(f"end_date: {end_date}")
-        
-        logger.info("Loading data from CSV...")
-        df = pd.read_csv(data_path)
-        logger.info(f"Data loaded successfully. Shape: {df.shape}")
-        logger.info(f"Columns: {df.columns.tolist()}")
-        
+        logger.info(f"Starting trading pipeline with parameters:")
         logger.info("Filtering data by date range...")
         df = filter_data_by_date(df, start_dt, end_dt)
         logger.info(f"Filtered data shape: {df.shape}")
@@ -390,15 +387,15 @@ def trading_pipeline(name, model_save_path, data_path, initial_capital, start_da
         numeric_columns = df.select_dtypes(include=[np.number]).columns
         for col in numeric_columns:
             df[col] = df[col].astype(float)
-        
         logger.info("Data preprocessing completed.")
 
+        # 환경을 먼저 생성한 후 모델 로드
+        logger.info(f"model_save_path: {model_save_path}")
         logger.info("Preparing environment...")
         env = prepare_env(df, initial_capital)
         logger.info("Environment prepared successfully.")
         
         logger.info("Loading model...")
-        # 환경을 먼저 생성한 후 모델 로드
         model = load_model(model_save_path)
         logger.info("Model loaded successfully.")
         

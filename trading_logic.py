@@ -250,111 +250,121 @@ def format_transactions(df_actions, df_data, df_account_value):
 def calculate_portfolio_status(df_actions, df_data, df_account_value, initial_capital):
     """
     투자 종료일 기준 보유중인 종목들의 포트폴리오 상태를 계산
+        - 매수: 수량/원가 증가
+        - 매도: 보유평단 * 매도수량 만큼 원가 차감 (MA 방식)
+        - 날짜 기준으로 액션-가격 매칭
     """
     USED_TICS = ['AAPL', 'AMZN', 'GOOGL', 'META', 'MSFT', 'NVDA', 'TSLA']
     portfolio_status = []
-    
-    logger.info(f"Starting portfolio status calculation...")
-    logger.info(f"df_actions shape: {df_actions.shape}")
-    logger.info(f"df_data shape: {df_data.shape}")
-    logger.info(f"df_account_value shape: {df_account_value.shape}")
-    
-    # 각 종목별 보유 현황 계산
+
+    # 0) 날짜 인덱스 준비 (액션에 날짜가 없으므로 account_value의 date를 사용)
+    #    df_actions의 길이와 거래일 수가 불일치하면 뒤에서 안전하게 슬라이스 됩니다.
+    trade_dates = None
+    if 'date' in df_account_value.columns:
+        trade_dates = pd.to_datetime(df_account_value['date'].values)
+    elif 'date' in df_data.columns:
+        # 종목/날짜 중복이 있으므로 unique
+        trade_dates = pd.to_datetime(df_data['date'].unique())
+        trade_dates.sort_values(inplace=True)
+
+    # df_actions에 date 부여
+    actions = df_actions.copy()
+    if trade_dates is not None:
+        actions = actions.iloc[:len(trade_dates)].copy()
+        actions.insert(0, 'date', trade_dates[:len(actions)])
+        actions.set_index('date', inplace=True)
+    # (그래도 날짜가 없다면 RangeIndex로 동작하지만, 아래 join에서 의미가 줄어듭니다)
+
+    # df_data: 종가 시계열 pivot (행: date, 열: 종목)
+    prices = (
+        df_data.loc[:, ['date', 'tic', 'close']]
+               .assign(date=lambda x: pd.to_datetime(x['date']))
+               .pivot(index='date', columns='tic', values='close')
+               .sort_index()
+    )
+
+    # 액션과 가격을 날짜 기준으로 정렬/정합
+    # (액션이 더 짧거나 길면 공통 구간만 사용)
+    if not actions.empty:
+        acts = actions.join(prices, how='left', rsuffix='_price')
+    else:
+        acts = prices.copy()
+        for t in USED_TICS:
+            if t not in acts.columns:
+                acts[t] = 0  # 액션이 없으면 0
+
+    # 결측 가격은 이전가로 보간(휴장일/결측 방지)
+    acts = acts.sort_index()
+    acts.loc[:, prices.columns] = acts.loc[:, prices.columns].ffill()
+
+    # 종목별 보유/원가 누적
+    final_total_assets = initial_capital
+    if not df_account_value.empty:
+        if 'account_value' in df_account_value.columns:
+            final_total_assets = float(df_account_value.iloc[-1]['account_value'])
+        elif 'total_assets' in df_account_value.columns:
+            final_total_assets = float(df_account_value.iloc[-1]['total_assets'])
+
     for symbol in USED_TICS:
-        logger.info(f"Processing symbol: {symbol}")
-        
-        # 해당 종목의 최종 가격 가져오기
-        symbol_data = df_data[df_data['tic'] == symbol]
-        if symbol_data.empty:
-            logger.warning(f"No data found for symbol: {symbol}")
+        if symbol not in acts.columns:  # 액션 없으면 스킵
             continue
-            
-        # 최종 가격 (마지막 날짜의 종가)
-        current_price = symbol_data.iloc[-1]['close']
-        logger.info(f"Current price for {symbol}: ${current_price:.2f}")
-        
-        # 해당 종목의 총 매수/매도 수량 계산
+
+        # 액션 수량과 가격 컬럼 준비
+        qty_series = acts[symbol].fillna(0)
+        # 가격은 prices에 동일 심볼이 있어야 합니다.
+        if symbol in prices.columns:
+            price_series = acts[symbol if symbol in prices.columns else f'{symbol}_price']
+            # 위 줄은 방어적이지만, 일반적으로 symbol가 prices.columns에 존재
+        else:
+            # 해당 종목 데이터 없으면 스킵
+            continue
+
         total_shares = 0
-        total_cost = 0
-        
-        if not df_actions.empty:
-            logger.info(f"Processing actions for {symbol}")
-            for idx, row in df_actions.iterrows():
-                if symbol in row and row[symbol] != 0:
-                    action_value = row[symbol]
-                    logger.info(f"Action for {symbol} at index {idx}: {action_value}")
-                    
-                    if action_value > 0:  # 매수
-                        # 해당 시점의 가격 가져오기
-                        action_price = symbol_data.iloc[0]['close']  # 기본값으로 첫 번째 가격 사용
-                        
-                        # 인덱스를 기반으로 해당 시점의 가격 추정
-                        if idx < len(symbol_data):
-                            action_price = symbol_data.iloc[idx]['close']
-                        
-                        shares_bought = action_value
-                        total_shares += shares_bought
-                        total_cost += shares_bought * action_price
-                        logger.info(f"Buy {symbol}: {shares_bought} shares at ${action_price:.2f}")
-                    else:  # 매도
-                        shares_sold = abs(action_value)
-                        total_shares -= shares_sold
-                        logger.info(f"Sell {symbol}: {shares_sold} shares")
-        else:
-            logger.warning(f"No actions data available")
-        
-        logger.info(f"Final shares for {symbol}: {total_shares}")
-        
-        # 보유 주식이 있는 경우에만 포트폴리오 상태에 추가
-        if total_shares > 0:
-            # 평균 매입 단가 계산
-            avg_price = total_cost / total_shares
-            
-            # 총 보유 금액
-            total_value = total_shares * current_price
-            
-            # 수익률 계산
-            if avg_price > 0:
-                profit_rate = ((current_price - avg_price) / avg_price) * 100
+        total_cost = 0.0
+
+        for qty, px in zip(qty_series.values, price_series.values):
+            if np.isnan(qty) or np.isnan(px) or qty == 0:
+                continue
+
+            if qty > 0:
+                # --- 매수 ---
+                buy_qty = int(qty)
+                # 수수료/슬리피지 반영 예:
+                # eff_buy_px = px * (1 + buy_fee_pct)
+                eff_buy_px = px
+                total_shares += buy_qty
+                total_cost   += buy_qty * eff_buy_px
+
             else:
-                # 평균 매입 단가가 0일 경우 profit_rate를 0으로 처리하여 0으로 나누는 오류 방지
-                logger.warning(f"Average purchase price is 0 for {symbol}, skipping profit_rate calculation.")
-                profit_rate = 0
-            
-            # 전체 포트폴리오 대비 비중 계산
-            # 최종 자산 가치를 기준으로 계산
-            final_total_assets = initial_capital
-            if not df_account_value.empty:
-                # account_value 컬럼이 있는지 확인
-                if 'account_value' in df_account_value.columns:
-                    final_total_assets = df_account_value.iloc[-1]['account_value']
-                elif 'total_assets' in df_account_value.columns:
-                    final_total_assets = df_account_value.iloc[-1]['total_assets']
-                else:
-                    # 수치형 컬럼 중 첫 번째 사용
-                    numeric_cols = df_account_value.select_dtypes(include=[np.number]).columns
-                    if len(numeric_cols) > 0:
-                        final_total_assets = df_account_value.iloc[-1][numeric_cols[0]]
-            
-            share_percentage = (total_value / final_total_assets * 100) if final_total_assets > 0 else 0
-            
-            portfolio_item = {
+                # --- 매도 ---
+                sell_qty = min(int(-qty), total_shares)  # 과매도 방지
+                if sell_qty > 0 and total_shares > 0:
+                    avg_px = total_cost / total_shares
+                    # 원가에서 '보유평단 * 매도수량'만큼 차감
+                    total_shares -= sell_qty
+                    total_cost   -= avg_px * sell_qty
+                    # 현금 유입/수수료는 원한다면 별도로 추적:
+                    # cash += sell_qty * px * (1 - sell_fee_pct)
+
+        # 최종 보유가 있으면 상태 산출
+        if total_shares > 0:
+            current_price = prices[symbol].iloc[-1]
+            avg_price = total_cost / total_shares
+            total_value = total_shares * current_price
+            profit_rate = ((current_price / avg_price) - 1.0) * 100.0 if avg_price > 0 else 0.0
+            share_percentage = (total_value / final_total_assets * 100.0) if final_total_assets > 0 else 0.0
+
+            portfolio_status.append({
                 "symbol": symbol,
-                "avg": float(round(avg_price, 2)),
-                "now": float(round(current_price, 2)),
-                "profit_rate": float(round(profit_rate, 2)),
-                "total": float(round(total_value, 2)),
-                "share": float(round(share_percentage, 2)),
+                "avg": round(float(avg_price), 2),
+                "now": round(float(current_price), 2),
+                "profit_rate": round(float(profit_rate), 2),
+                "total": round(float(total_value), 2),
+                "share": round(float(share_percentage), 2),
                 "qty": int(total_shares),
-                "profit": float(round((current_price - avg_price) * total_shares, 2))  # 종목별 증감액
-            }
-            
-            portfolio_status.append(portfolio_item)
-            logger.info(f"Portfolio status for {symbol}: {portfolio_item}")
-        else:
-            logger.info(f"No shares held for {symbol}")
-    
-    logger.info(f"Total portfolio status items: {len(portfolio_status)}")
+                "profit": round(float((current_price - avg_price) * total_shares), 2),
+            })
+
     return portfolio_status
 
 

@@ -16,7 +16,7 @@ from datetime import datetime
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-
+USED_TICS = ['AAPL','AMZN','GOOGL','META','MSFT','NVDA','TSLA']
 def load_model(model_save_path):
     # TD3 모델을 직접 로드
     model = TD3.load(model_save_path)
@@ -111,139 +111,127 @@ def calculate_sharpe_ratio(df_account_value, portfolio_value_col):
 
 
 def format_transactions(df_actions, df_data, df_account_value):
-    df_actions = df_actions.reset_index(drop=True)  # 인덱스 리셋 추가
     """
-    df_actions를 프론트엔드 TradingHistory 페이지에 필요한 거래내역 형식으로 변환
+    df_actions -> 거래내역 리스트 (실현손익 포함, 날짜 정합)
+    전제:
+      - df_actions: 각 날짜행에 종목별 수량 (+매수, -매도)
+      - df_data: (date, tic, close) 포함
+      - df_account_value: date 포함 (액션 길이만큼 존재한다고 가정; 부족하면 df_data 날짜 사용)
     """
     transactions = []
-    USED_TICS = ['AAPL', 'AMZN', 'GOOGL', 'META', 'MSFT', 'NVDA', 'TSLA']
-    
-    if df_actions.empty:
-        logger.info("df_actions is empty, no transactions to format")
-        return []
-    
-    logger.info(f"df_actions columns: {df_actions.columns.tolist()}")
-    logger.info(f"df_actions shape: {df_actions.shape}")
-    
-    # 각 종목별 가격 데이터 준비
-    price_data = {}
-    try:
+
+    if df_actions is None or len(df_actions) == 0:
+        return transactions
+
+    # --- 날짜 인덱스 구성 ---
+    def _get_trade_dates(df_actions, df_data, df_account_value):
+        dates_from_acc = None
+        if 'date' in getattr(df_account_value, 'columns', []):
+            dates_from_acc = pd.to_datetime(df_account_value['date'].values)
+
+        dates_from_data = None
+        if 'date' in getattr(df_data, 'columns', []):
+            dates_from_data = pd.to_datetime(pd.Series(df_data['date'].unique())).sort_values().values
+
+        # account_value가 액션 길이 이상이면 우선 사용, 아니면 df_data 사용
+        if dates_from_acc is not None and len(dates_from_acc) >= len(df_actions):
+            return dates_from_acc
+        elif dates_from_data is not None:
+            return dates_from_data
+        else:
+            # fallback: RangeIndex -> 임의 날짜 부여
+            start = pd.Timestamp('2024-01-01')
+            return pd.date_range(start, periods=len(df_actions), freq='B').values
+
+    trade_dates = _get_trade_dates(df_actions, df_data, df_account_value)
+
+    actions = df_actions.copy()
+    # df_actions에 date 컬럼이 없다는 가정하에 날짜 부여
+    if 'date' not in actions.columns:
+        actions.insert(0, 'date', trade_dates[:len(actions)])
+    actions['date'] = pd.to_datetime(actions['date'])
+    actions = actions.set_index('date').sort_index()
+
+    # --- 가격 피벗 (행: date, 열: 종목) ---
+    prices = (df_data[['date','tic','close']]
+              .assign(date=lambda x: pd.to_datetime(x['date']))
+              .pivot(index='date', columns='tic', values='close')
+              .sort_index())
+    # 결측은 앞값 채우기
+    prices = prices.ffill()
+
+    # --- 상태 변수(종목별) ---
+    total_shares = {tic: 0 for tic in USED_TICS}
+    total_cost   = {tic: 0.0 for tic in USED_TICS}  # 누적 원가(매수원가 합 - 매도 시 평단*수량 차감)
+
+    tx_id = 1
+    # 공통 날짜 집합으로 루프
+    common_dates = actions.index.intersection(prices.index)
+
+    for d in common_dates:
+        row = actions.loc[d]
         for tic in USED_TICS:
-            tic_data = df_data[df_data['tic'] == tic]
-            if not tic_data.empty:
-                price_data[tic] = tic_data
-    except Exception as e:
-        logger.error(f"Error preparing price data: {e}")
-        return []
-    
-    # 각 종목별 평균 매입 단가 추적
-    avg_purchase_prices = {tic: 0.0 for tic in USED_TICS}
-    total_shares_held = {tic: 0 for tic in USED_TICS}
-    total_cost_basis = {tic: 0.0 for tic in USED_TICS}
-    
-    transaction_id = 1
-    
-    for idx, row in df_actions.iterrows():
-        # 날짜 정보 추출
-        date_str = "2024-01-15"  # 기본값
-        
-        if 'date' in row:
-            date_str = str(row['date'])
-        elif 'step' in row:
-            date_str = f"2024-01-{row['step']:02d}"
-        elif idx < len(df_account_value) and 'date' in df_account_value.columns:
-            # account_values의 인덱스에 해당하는 날짜 사용
-            try:
-                date_obj = df_account_value.iloc[idx]['date']
-                # datetime 객체인지 확인하고 안전하게 문자열로 변환
-                if hasattr(date_obj, 'strftime'):
-                    date_str = date_obj.strftime('%Y-%m-%d')
-                else:
-                    date_str = str(date_obj)
-            except Exception as e:
-                logger.error(f"Error processing date: {e}")
-                date_str = "2024-01-15"
-        
-        # 각 종목별 거래 처리
-        for tic in USED_TICS:
-            # 직접 종목명으로 액션 값 확인
-            if tic in row and row[tic] != 0:
-                action_value = row[tic]
-                quantity = abs(action_value)
-                
-                # 해당 시점의 가격 정보 가져오기
-                price = 100.0  # 기본값
-                if tic in price_data:
-                    tic_price_data = price_data[tic]
-                    if idx < len(tic_price_data):
-                        price = tic_price_data.iloc[idx]['close']
-                    else:
-                        # 인덱스가 범위를 벗어나면 마지막 가격 사용
-                        price = tic_price_data.iloc[-1]['close']
-                
-                # 거래 타입 결정 (양수면 매수, 음수면 매도)
-                trade_type = "Buy" if action_value > 0 else "Sell"
-                
-                # 거래 금액 계산
-                trade_amount = quantity * price
-                
-                # 손익 계산 (매도인 경우)
-                profit_loss = None
-                if trade_type == "Sell":
-                    # 평균 매입 단가가 있는 경우에만 손익 계산
-                    if avg_purchase_prices[tic] > 0:
-                        # 매도 시 손익 = (매도가격 - 평균매입단가) * 매도수량
-                        profit_loss = (price - avg_purchase_prices[tic]) * quantity
-                        profit_loss = round(profit_loss)
-                        logger.info(f"Sell profit/loss for {tic}: (${price:.2f} - ${avg_purchase_prices[tic]:.2f}) * {quantity} = ${profit_loss:.2f}")
-                    else:
-                        profit_loss = 0.0
-                        logger.warning(f"No average purchase price available for {tic}, setting profit/loss to 0")
-                
-                # 평균 매입 단가 업데이트 (매수인 경우)
-                if trade_type == "Buy":
-                    # 새로운 매수로 인한 평균 매입 단가 재계산
-                    current_shares = total_shares_held[tic]
-                    current_cost = total_cost_basis[tic]
-                    
-                    new_shares = quantity
-                    new_cost = quantity * price
-                    
-                    total_shares_held[tic] = current_shares + new_shares
-                    total_cost_basis[tic] = current_cost + new_cost
-                    
-                    # 평균 매입 단가 = 총 매입 비용 / 총 보유 주식 수
-                    if total_shares_held[tic] > 0:
-                        avg_purchase_prices[tic] = total_cost_basis[tic] / total_shares_held[tic]
-                        logger.info(f"Updated avg purchase price for {tic}: ${avg_purchase_prices[tic]:.2f} (shares: {total_shares_held[tic]}, cost: ${total_cost_basis[tic]:.2f})")
-                
-                # 매도 시 보유 주식 수 감소
-                elif trade_type == "Sell":
-                    total_shares_held[tic] -= quantity
-                    # 매도 후 보유 주식이 0이 되면 평균 매입 단가 초기화
-                    if total_shares_held[tic] <= 0:
-                        avg_purchase_prices[tic] = 0.0
-                        total_cost_basis[tic] = 0.0
-                        total_shares_held[tic] = 0
-                        logger.info(f"Reset avg purchase price for {tic} after selling all shares")
-                
-                transaction = {
-                    "id": int(transaction_id),
-                    "datetime": f"{date_str} 10:00",
+            if tic not in row:
+                continue
+            qty = row[tic]
+            if pd.isna(qty) or qty == 0:
+                continue
+
+            px = prices.at[d, tic] if tic in prices.columns else np.nan
+            if pd.isna(px):
+                continue
+
+            if qty > 0:
+                # --- 매수 ---
+                buy_qty = int(qty)
+                # 수수료가 있다면 px*(1+fee)로 교체 가능
+                eff_px = px
+                total_shares[tic] += buy_qty
+                total_cost[tic]   += buy_qty * eff_px
+                # 평균매입가(참고용)
+                avg_px = total_cost[tic] / total_shares[tic]
+
+                transactions.append({
+                    "id": int(tx_id),
+                    "datetime": f"{d.strftime('%Y-%m-%d')} 10:00",
                     "symbol": tic,
-                    "type": trade_type,
-                    "quantity": int(quantity),
-                    "price": float(round(price, 2)),
-                    "amount": float(round(trade_amount, 2)),
-                    "profitLoss": float(profit_loss) if profit_loss is not None else None,
-                    "day": int(idx + 1)
-                }
-                
-                transactions.append(transaction)
-                logger.info(f"Transaction {transaction_id}: {trade_type} {quantity} shares of {tic} at ${price:.2f} = ${trade_amount:.2f}")
-                transaction_id += 1
-    
-    logger.info(f"Total transactions formatted: {len(transactions)}")
+                    "type": "Buy",
+                    "quantity": int(buy_qty),
+                    "price": float(round(px, 2)),
+                    "amount": float(round(buy_qty * px, 2)),
+                    "profitLoss": None,
+                    "day": None
+                })
+                tx_id += 1
+
+            else:
+                # --- 매도 ---
+                sell_qty = min(int(-qty), total_shares[tic])  # 과매도 방지
+                if sell_qty == 0:
+                    continue
+
+                avg_px_before = total_cost[tic] / total_shares[tic] if total_shares[tic] > 0 else 0.0
+                realized_pl = (px - avg_px_before) * sell_qty   # 실현손익
+
+                # 원가/수량 업데이트(가중평균 원가 방식)
+                total_shares[tic] -= sell_qty
+                total_cost[tic]   -= avg_px_before * sell_qty
+                if total_shares[tic] == 0:
+                    total_cost[tic] = 0.0  # 부동소수 누적 오차 방지
+
+                transactions.append({
+                    "id": int(tx_id),
+                    "datetime": f"{d.strftime('%Y-%m-%d')} 10:00",
+                    "symbol": tic,
+                    "type": "Sell",
+                    "quantity": int(sell_qty),
+                    "price": float(round(px, 2)),
+                    "amount": float(round(sell_qty * px, 2)),
+                    "profitLoss": float(round(realized_pl)),  # 양수/음수 정상 반영
+                    "day": None
+                })
+                tx_id += 1
+
     return transactions
 
 
@@ -254,7 +242,6 @@ def calculate_portfolio_status(df_actions, df_data, df_account_value, initial_ca
         - 매도: 보유평단 * 매도수량 만큼 원가 차감 (MA 방식)
         - 날짜 기준으로 액션-가격 매칭
     """
-    USED_TICS = ['AAPL', 'AMZN', 'GOOGL', 'META', 'MSFT', 'NVDA', 'TSLA']
     portfolio_status = []
 
     # 0) 날짜 인덱스 준비 (액션에 날짜가 없으므로 account_value의 date를 사용)
